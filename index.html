@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>节点可用性检测 v20260504.1826</title>
+<title>节点可用性检测</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
@@ -41,7 +41,7 @@ footer{font-size:11px;color:#334155;text-align:center;margin-top:12px;line-heigh
 </head>
 <body>
 <div class="wrap">
-  <h1>🔍 节点可用性检测 <span style="font-size:11px;font-weight:400;color:#475569;margin-left:6px">v20260504.1826</span></h1>
+  <h1>🔍 节点可用性检测</h1>
   <p class="desc">从你的网络实测代理节点，结果汇总后改善订阅质量</p>
 
   <div class="card">
@@ -181,13 +181,16 @@ async function detectCountry() {
 // 使用 fetch mode:no-cors 向代理服务器发 HTTPS 请求
 // 成功返回 opaque response → 节点可达
 // 网络错误/超时           → 节点不可达
-async function testNode(server, port) {
+async function testNode(server, port, sni) {
+  // 关键: 必须用 SNI 域名而非裸 IP 发起 HTTPS 请求
+  // 否则 TLS 握手因证书不匹配必然失败，导致误判为"不可达"
+  const host  = sni || server;
   const start = performance.now();
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), CONFIG.TIMEOUT_MS);
 
   try {
-    await fetch('https://' + server + ':' + port + '/', {
+    await fetch('https://' + host + ':' + port + '/', {
       mode: 'no-cors',
       cache: 'no-store',
       signal: ctrl.signal,
@@ -230,18 +233,18 @@ async function runTest(pool) {
   const latencies = [];
   const results   = [];
 
-  const tasks = pool.map(({ s: server, p: port }) => async () => {
-    const r = await testNode(server, port);
+  const tasks = pool.map(({ s: server, p: port, sni }) => async () => {
+    const r = await testNode(server, port, sni);
     done++;
     setProgress(done, pool.length);
 
     if (r.ok) {
       ok++;
       if (r.ms) latencies.push(r.ms);
-      if (ok <= 20) log('✓  ' + server + ':' + port + '   ' + r.ms + 'ms', 'ok');
+      if (ok <= 20) log('✓  ' + (sni||server) + ':' + port + '   ' + r.ms + 'ms', 'ok');
     } else {
       fail++;
-      if (fail <= 8) log('✗  ' + server + ':' + port + '   ' + r.reason, 'fail');
+      if (fail <= 8) log('✗  ' + (sni||server) + ':' + port + '   ' + r.reason, 'fail');
     }
 
     updateStats(ok, fail, latencies);

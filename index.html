@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>节点可用性检测</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     background:#0f172a;color:#e2e8f0;min-height:100vh;padding:20px 16px}
+.wrap{max-width:660px;margin:0 auto}
+h1{font-size:20px;font-weight:700;color:#f1f5f9;margin-bottom:4px}
+.desc{font-size:13px;color:#64748b;margin-bottom:20px}
+.card{background:#1e293b;border-radius:12px;padding:18px;margin-bottom:14px}
+.modes{display:flex;gap:8px;margin-bottom:14px}
+.mode{flex:1;padding:10px 8px;border-radius:8px;border:2px solid;
+      background:transparent;color:#94a3b8;font-size:13px;font-weight:600;
+      cursor:pointer;text-align:center;line-height:1.4;transition:.15s}
+.mode small{font-weight:400;font-size:11px;display:block;margin-top:2px}
+.mode.active{border-color:#3b82f6;background:#1e3a5f;color:#93c5fd}
+.btn{width:100%;padding:12px;border:none;border-radius:8px;font-size:15px;
+     font-weight:600;cursor:pointer;background:#3b82f6;color:#fff;transition:.2s}
+.btn:hover{background:#2563eb}
+.btn:disabled{background:#334155;color:#64748b;cursor:not-allowed}
+.pbar-wrap{height:5px;background:#334155;border-radius:3px;margin:14px 0 6px;overflow:hidden}
+.pbar{height:100%;background:linear-gradient(90deg,#3b82f6,#06b6d4);
+      border-radius:3px;width:0%;transition:width .3s}
+.ptext{font-size:12px;color:#64748b;text-align:center}
+.stats{display:flex;gap:10px;margin-top:12px}
+.stat{flex:1;background:#0f172a;border-radius:8px;padding:10px;text-align:center}
+.stat b{font-size:24px;font-weight:700;display:block}
+.stat span{font-size:11px;color:#64748b}
+.green{color:#22c55e}.red{color:#ef4444}.blue{color:#3b82f6}.amber{color:#f59e0b}
+.log{height:200px;overflow-y:auto;font-size:12px;font-family:monospace;
+     background:#0f172a;border-radius:8px;padding:10px;margin-top:10px}
+.log div{padding:1px 0;border-bottom:1px solid #1e293b}
+.info{color:#64748b}.ok{color:#22c55e}.fail{color:#ef4444}.warn{color:#f59e0b}
+#status{margin-top:10px;font-size:13px;text-align:center;color:#64748b;min-height:20px}
+footer{font-size:11px;color:#334155;text-align:center;margin-top:12px;line-height:1.8}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔍 节点可用性检测</h1>
+  <p class="desc">从你的网络实测代理节点，结果汇总后改善订阅质量</p>
+
+  <div class="card">
+    <div class="modes">
+      <button class="mode active" id="mFast" onclick="switchMode('fast')">
+        ⚡ 快速验证
+        <small id="fastCount">加载中...</small>
+      </button>
+      <button class="mode" id="mDeep" onclick="switchMode('deep')">
+        🔍 完整探测
+        <small id="deepCount">加载中...</small>
+      </button>
+    </div>
+
+    <button class="btn" id="btn" onclick="start()">开始检测</button>
+
+    <div class="pbar-wrap"><div class="pbar" id="pbar"></div></div>
+    <div class="ptext" id="ptext">就绪</div>
+
+    <div class="stats">
+      <div class="stat"><b class="green" id="nOk">—</b><span>可达</span></div>
+      <div class="stat"><b class="red"   id="nFail">—</b><span>不可达</span></div>
+      <div class="stat"><b class="blue"  id="nPct">—</b><span>可用率</span></div>
+      <div class="stat"><b class="amber" id="nLat">—</b><span>均延迟</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="font-size:13px;color:#94a3b8;margin-bottom:8px">测试日志</div>
+    <div class="log" id="log"><div class="info">等待开始...</div></div>
+  </div>
+
+  <div id="status"></div>
+
+  <footer>
+    测试在你的浏览器本地运行 · 只上报节点 IP 及连通结果 · 不收集任何个人信息<br>
+    并发数: 6 个 · 超时: 6s · <span id="nodeInfo"></span>
+  </footer>
+</div>
+
+<script>
+// ── 配置 ──────────────────────────────────────────────────────
+const CONFIG = {
+  REPORT_URL:  '/api/cn-report',   // 上报端点
+  NODES_URL:   '/test-nodes.json?t=O4NV8FAkd-wI_X1QolO-cQ', // 节点数据（不含 proxy 关键词）
+  CONCURRENCY: 6,                  // 并发数（适合移动端）
+  TIMEOUT_MS:  6000,               // 单节点超时
+  BATCH_DELAY: 50,                 // 批次间延迟 ms（降低突发流量）
+};
+
+// ── 状态 ──────────────────────────────────────────────────────
+let mode    = 'fast';
+let running = false;
+let nodes   = { fast: [], deep: [] };
+
+// ── 初始化：加载节点数据 ──────────────────────────────────────
+(async () => {
+  try {
+    const r = await fetch(CONFIG.NODES_URL, {cache: 'no-cache'});
+    nodes = await r.json();
+    document.getElementById('fastCount').textContent =
+      nodes.fast.length + ' 个已确认节点';
+    document.getElementById('deepCount').textContent =
+      nodes.deep.length + ' 个待验证节点';
+    document.getElementById('nodeInfo').textContent =
+      `快速池 ${nodes.fast.length} · 深度池 ${nodes.deep.length}`;
+  } catch (e) {
+    document.getElementById('fastCount').textContent = '加载失败';
+    document.getElementById('deepCount').textContent = '';
+    log('节点数据加载失败: ' + e.message, 'fail');
+  }
+})();
+
+// ── UI 辅助 ───────────────────────────────────────────────────
+function switchMode(m) {
+  mode = m;
+  ['fast','deep'].forEach(k => {
+    document.getElementById('m' + k.charAt(0).toUpperCase() + k.slice(1))
+      .classList.toggle('active', k === m);
+  });
+}
+
+function log(msg, cls = 'info') {
+  const el = document.getElementById('log');
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = new Date().toTimeString().slice(0, 8) + '  ' + msg;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function updateStats(ok, fail, latencies) {
+  const total = ok + fail;
+  document.getElementById('nOk').textContent   = ok;
+  document.getElementById('nFail').textContent  = fail;
+  document.getElementById('nPct').textContent   =
+    total ? Math.round(ok / total * 100) + '%' : '—';
+  document.getElementById('nLat').textContent   =
+    latencies.length
+      ? Math.round(latencies.reduce((a, b) => a + b) / latencies.length) + 'ms'
+      : '—';
+}
+
+function setProgress(done, total) {
+  document.getElementById('pbar').style.width =
+    Math.round(done / total * 100) + '%';
+  document.getElementById('ptext').textContent =
+    done + ' / ' + total + '  (' + Math.round(done / total * 100) + '%)';
+}
+
+// ── 国家检测（Cloudflare trace，最可靠）────────────────────────
+async function detectCountry() {
+  const sources = [
+    () => fetch('https://cloudflare.com/cdn-cgi/trace', {cache:'no-store'})
+            .then(r => r.text())
+            .then(t => t.match(/loc=([A-Z]{2})/)?.[1]),
+    () => fetch('https://1.1.1.1/cdn-cgi/trace', {cache:'no-store'})
+            .then(r => r.text())
+            .then(t => t.match(/loc=([A-Z]{2})/)?.[1]),
+    () => fetch('https://ipinfo.io/country', {cache:'no-store'})
+            .then(r => r.text())
+            .then(t => t.trim()),
+  ];
+  for (const src of sources) {
+    try {
+      const cc = await Promise.race([
+        src(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000)),
+      ]);
+      if (cc && /^[A-Z]{2}$/.test(cc)) return cc;
+    } catch { /* try next */ }
+  }
+  return null; // 无法检测
+}
+
+// ── 单节点测试 ────────────────────────────────────────────────
+// 使用 fetch mode:no-cors 向代理服务器发 HTTPS 请求
+// 成功返回 opaque response → 节点可达
+// 网络错误/超时           → 节点不可达
+async function testNode(server, port) {
+  const start = performance.now();
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CONFIG.TIMEOUT_MS);
+
+  try {
+    await fetch('https://' + server + ':' + port + '/', {
+      mode: 'no-cors',
+      cache: 'no-store',
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    return { ok: true, ms: Math.round(performance.now() - start) };
+  } catch (e) {
+    clearTimeout(timer);
+    return {
+      ok: false,
+      ms: null,
+      reason: e.name === 'AbortError' ? 'timeout' : 'unreachable',
+    };
+  }
+}
+
+// ── 并发控制（受控并发，非全并发爆发）────────────────────────
+async function runWithConcurrency(tasks, limit) {
+  let idx = 0;
+  const worker = async () => {
+    while (idx < tasks.length) {
+      const task = tasks[idx++];
+      await task();
+      if (CONFIG.BATCH_DELAY > 0) {
+        await new Promise(r => setTimeout(r, CONFIG.BATCH_DELAY));
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: limit }, worker));
+}
+
+// ── 主测试流程 ────────────────────────────────────────────────
+async function runTest(pool) {
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('status').textContent = '';
+
+  log('开始测试 ' + pool.length + ' 个节点（并发 ' + CONFIG.CONCURRENCY + '）');
+
+  let ok = 0, fail = 0, done = 0;
+  const latencies = [];
+  const results   = [];
+
+  const tasks = pool.map(({ s: server, p: port }) => async () => {
+    const r = await testNode(server, port);
+    done++;
+    setProgress(done, pool.length);
+
+    if (r.ok) {
+      ok++;
+      if (r.ms) latencies.push(r.ms);
+      if (ok <= 20) log('✓  ' + server + ':' + port + '   ' + r.ms + 'ms', 'ok');
+    } else {
+      fail++;
+      if (fail <= 8) log('✗  ' + server + ':' + port + '   ' + r.reason, 'fail');
+    }
+
+    updateStats(ok, fail, latencies);
+    results.push({ server, port, tcp_ms: r.ms, tls_ok: r.ok });
+  });
+
+  await runWithConcurrency(tasks, CONFIG.CONCURRENCY);
+
+  log('完成 — 可达 ' + ok + ' / ' + pool.length, ok > 0 ? 'ok' : 'fail');
+  return results;
+}
+
+// ── 上报结果 ──────────────────────────────────────────────────
+async function report(results) {
+  const statusEl = document.getElementById('status');
+  statusEl.textContent = '上报结果中...';
+  try {
+    const resp = await fetch(CONFIG.REPORT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodes: results }),
+    });
+    const data = await resp.json();
+    statusEl.style.color = '#22c55e';
+    statusEl.textContent =
+      '✓ 已上报 ' + results.length + ' 个节点，'
+      + '标记可达 ' + data.marked_ok + ' / 不可达 ' + data.marked_fail
+      + ' — 感谢你的贡献！';
+  } catch (e) {
+    statusEl.textContent = '上报失败（本地结果仍有效）: ' + e.message;
+  }
+}
+
+// ── 入口 ─────────────────────────────────────────────────────
+async function start() {
+  if (running) return;
+
+  const pool = nodes[mode] || [];
+  if (pool.length === 0) {
+    log('节点数据未加载，请刷新重试', 'fail'); return;
+  }
+
+  // IP 检测
+  const btn = document.getElementById('btn');
+  btn.disabled = true;
+  btn.textContent = '检测网络位置...';
+
+  const cc = await detectCountry();
+
+  if (cc !== null && cc !== 'CN') {
+    log('当前 IP 归属地: ' + cc + '（非中国大陆）', 'warn');
+    log('本工具需在中国大陆网络下运行，结果才有意义', 'info');
+    log('如确认你在大陆，可点击"忽略继续"', 'info');
+    btn.textContent = '忽略，仍然测试';
+    btn.disabled = false;
+    btn.onclick = forceStart;
+    return;
+  }
+
+  if (cc === null) log('⚠️  无法检测 IP 归属，继续执行（结果仅供参考）', 'warn');
+  else              log('✓  检测到中国大陆网络', 'ok');
+
+  await execute(pool);
+}
+
+async function forceStart() {
+  document.getElementById('btn').onclick = start;
+  const pool = nodes[mode] || [];
+  await execute(pool);
+}
+
+async function execute(pool) {
+  running = true;
+  const btn = document.getElementById('btn');
+  btn.disabled = true;
+  btn.textContent = '检测中...';
+
+  const results = await runTest(pool);
+  await report(results);
+
+  btn.textContent = '重新检测';
+  btn.disabled = false;
+  running = false;
+}
+</script>
+</body>
+</html>
